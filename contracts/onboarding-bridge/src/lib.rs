@@ -2498,17 +2498,17 @@ impl OnboardingBridge {
 
     /// Returns `true` if `address` is on the blocklist.
     pub fn query_is_blocked(env: Env, address: Address) -> bool {
-        todo!("implement: query_is_blocked")
+        is_blocked(&env, &address)
     }
 
     /// Returns `true` if `address` is on the allowlist.
     pub fn query_is_allowlisted(env: Env, address: Address) -> bool {
-        todo!("implement: query_is_allowlisted")
+        is_allowlisted(&env, &address)
     }
 
     /// Returns `true` if allowlist mode is currently enabled.
     pub fn query_allowlist_mode(env: Env) -> bool {
-        todo!("implement: query_allowlist_mode")
+        allowlist_mode(&env)
     }
 
     // -----------------------------------------------------------------------
@@ -2564,7 +2564,58 @@ impl OnboardingBridge {
         destination: Address,
         nonce: Option<u64>,
     ) -> Result<(), BridgeError> {
-        todo!("implement: reclaim_tokens")
+        // Check if contract is initialized
+        check_initialized(&env)?;
+
+        // Get admin address
+        let admin = read_admin(&env);
+
+        // Require admin authentication
+        admin.require_auth();
+
+        // Consume nonce if provided
+        consume_nonce(&env, &admin, nonce)?;
+
+        // Validate amount > 0
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+
+        // Get asset counters to read accrued_fees and locked_timelock
+        let asset_counters = read_asset_counters(&env, &asset);
+        let accrued_fees = asset_counters.accrued_fees;
+        let locked_timelock = asset_counters.locked_timelock;
+
+        // Get contract token balance
+        let token_client = token::Client::new(&env, &asset);
+        let contract_addr = env.current_contract_address();
+        let contract_balance = token_client.balance(&contract_addr);
+
+        // Calculate reclaimable amount
+        // reclaimable = contract_balance - accrued_fees - locked_timelock
+        let reclaimable = safe_math::safe_sub(
+            safe_math::safe_sub(contract_balance, accrued_fees)?,
+            locked_timelock,
+        )?;
+
+        // Check if amount exceeds reclaimable
+        if amount > reclaimable {
+            return Err(BridgeError::InsufficientReclaimable);
+        }
+
+        // Transfer tokens to destination
+        token_client.transfer(&contract_addr, &destination, &amount);
+
+        // Extend instance TTL
+        extend_instance_ttl(&env);
+
+        // Emit event
+        env.events().publish(
+            ("TokensReclaimed", admin, asset),
+            (amount, destination),
+        );
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -2591,7 +2642,34 @@ impl OnboardingBridge {
     /// * [`BridgeError::NotInitialized`] — Contract not yet initialised.
     /// * [`BridgeError::DuplicateNonce`] — `nonce` mismatch.
     pub fn add_asset(env: Env, asset: Address, nonce: Option<u64>) -> Result<(), BridgeError> {
-        todo!("implement: add_asset")
+        // Check if contract is initialized
+        check_initialized(&env)?;
+
+        // Get admin address
+        let admin = read_admin(&env);
+
+        // Require admin authentication
+        admin.require_auth();
+
+        // Consume nonce if provided
+        consume_nonce(&env, &admin, nonce)?;
+
+        // Get current whitelist
+        let mut whitelist = read_whitelist(&env);
+
+        // Add asset to whitelist (idempotent - if already present, no change)
+        whitelist.set(asset.clone(), true);
+
+        // Save updated whitelist
+        save_whitelist(&env, &whitelist);
+
+        // Extend instance TTL
+        extend_instance_ttl(&env);
+
+        // Emit event
+        env.events().publish(("AssetWhitelisted", admin), (asset,));
+
+        Ok(())
     }
 
     /// Removes `asset` from the token whitelist.
